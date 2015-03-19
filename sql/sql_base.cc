@@ -5013,16 +5013,23 @@ TABLE *open_n_lock_single_table(THD *thd, TABLE_LIST *table_l,
     lock_flags          Flags passed to mysql_lock_table
 
   NOTE
-    This function doesn't do anything like SP/SF/views/triggers analysis done 
+    This function doesn't do anything like SP/SF/views/triggers analysis done
     in open_table()/lock_tables(). It is intended for opening of only one
-    concrete table. And used only in special contexts.
+    concrete table. And used only in special contexts:
+    - (CREATE|DROP|ALTER) (FUNCTION|PROCEDURE|SERVER)
+    - (INSTALL|UNINSTALL) PLUGIN
+    - log tables
+    - OPTIMIZE TABLE falled back to ALTER
+
+    In most cases it is used to open non-transactional system table. An
+    exception is OPTIMIZE TABLE: it may open any table.
 
   RETURN VALUES
     table		Opened table
     0			Error
-  
+
     If ok, the following are also set:
-      table_list->lock_type 	lock_type
+      table_list->lock_type	lock_type
       table_list->table		table
 */
 
@@ -5087,7 +5094,11 @@ TABLE *open_ltable(THD *thd, TABLE_LIST *table_list, thr_lock_type lock_type,
     if (thd->locked_tables_mode)
     {
       if (check_lock_and_start_stmt(thd, thd->lex, table_list))
+      {
+        if (!thd->in_sub_stmt && table->file->has_transactions())
+          trans_rollback_stmt(thd);
 	table= 0;
+      }
     }
     else
     {
@@ -5096,6 +5107,8 @@ TABLE *open_ltable(THD *thd, TABLE_LIST *table_list, thr_lock_type lock_type,
 	if (! (thd->lock= mysql_lock_tables(thd, &table_list->table, 1,
                                             lock_flags)))
         {
+          if (!thd->in_sub_stmt && table->file->has_transactions())
+            trans_rollback_stmt(thd);
           table= 0;
         }
     }
@@ -5105,11 +5118,7 @@ TABLE *open_ltable(THD *thd, TABLE_LIST *table_list, thr_lock_type lock_type,
 
 end:
   if (table == NULL)
-  {
-    if (!thd->in_sub_stmt)
-      trans_rollback_stmt(thd);
     close_thread_tables(thd);
-  }
   THD_STAGE_INFO(thd, stage_after_opening_tables);
 
   thd_proc_info(thd, 0);
