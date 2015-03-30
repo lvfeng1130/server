@@ -22,7 +22,7 @@ use mtr||
 -- be suppressed
 --
 CREATE TABLE test_suppressions (
-  pattern VARCHAR(255)
+  pattern VARCHAR(255), UNIQUE KEY (pattern)
 ) ENGINE=MyISAM||
 
 
@@ -282,7 +282,7 @@ END||
 CREATE DEFINER=root@localhost
 PROCEDURE add_suppression(pattern VARCHAR(255))
 BEGIN
-  INSERT INTO test_suppressions (pattern) VALUES (pattern);
+  REPLACE INTO test_suppressions (pattern) VALUES (pattern);
 END
 */||
 
