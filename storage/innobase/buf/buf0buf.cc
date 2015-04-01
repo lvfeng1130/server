@@ -5602,6 +5602,17 @@ buf_page_init_for_backup_restore(
 }
 #endif /* !UNIV_HOTBACKUP */
 
+static
+byte*
+alloc_aligned_buf(ulint size, byte **helper)
+{
+	// TODO: Is 4k aligment enough ?
+	const ulint alignment = 4096;
+	*helper= (byte *)malloc(size + alignment);
+	return (byte *)ut_align(*helper, alignment);
+}
+
+
 /********************************************************************//**
 Encrypts a buffer page right before it's flushed to disk
 */
@@ -5655,9 +5666,7 @@ buf_page_encrypt_before_write(
 	*/
 
 	if (bpage->crypt_buf_free == NULL) {
-		bpage->crypt_buf_free = (byte*)malloc(page_size*2);
-		// TODO: Is 4k aligment enough ?
-		bpage->crypt_buf = (byte *)ut_align(bpage->crypt_buf_free, page_size);
+		bpage->crypt_buf = alloc_aligned_buf(page_size, &bpage->crypt_buf_free);
 	}
 
 	byte *dst_frame = bpage->crypt_buf;
@@ -5728,9 +5737,7 @@ buf_page_decrypt_before_read(
         if (bpage->crypt_buf_free == NULL)
         {
           // allocate buffer to read data into
-          bpage->crypt_buf_free = (byte*)malloc(size*2);
-          // TODO: Is 4K aligment enough ?
-          bpage->crypt_buf = (byte*)ut_align(bpage->crypt_buf_free, size);
+          bpage->crypt_buf = alloc_aligned_buf(size, &bpage->crypt_buf_free);
         }
         return bpage->crypt_buf;
 }
@@ -5744,11 +5751,6 @@ buf_page_decrypt_after_read(
 	buf_page_t* bpage) /*!< in/out: buffer page read from disk */
 {
 	ut_ad(bpage->key_version == 0);
-	ulint zip_size = buf_page_get_zip_size(bpage);
-	ulint size = (zip_size) ? zip_size : UNIV_PAGE_SIZE;
-
-	byte* dst_frame = (zip_size) ? bpage->zip.data :
-		((buf_block_t*) bpage)->frame;
 
 	if (bpage->offset == 0) {
 		/* File header pages are not encrypted */
@@ -5756,7 +5758,11 @@ buf_page_decrypt_after_read(
 		return (TRUE);
 	}
 
+	ulint zip_size = buf_page_get_zip_size(bpage);
+	ulint size = (zip_size) ? zip_size : UNIV_PAGE_SIZE;
 
+	byte* dst_frame = (zip_size) ? bpage->zip.data :
+		((buf_block_t*) bpage)->frame;
 	const byte* src_frame = bpage->crypt_buf != NULL ?
 		bpage->crypt_buf : dst_frame;
 
@@ -5770,9 +5776,7 @@ buf_page_decrypt_after_read(
 
 		if (fil_page_is_compressed(dst_frame)) {
 			if (bpage->comp_buf_free == NULL) {
-				bpage->comp_buf_free = (byte *)malloc(UNIV_PAGE_SIZE*2);
-				// TODO: is 4k aligment enough ?
-				bpage->comp_buf = (byte*)ut_align(bpage->comp_buf_free, UNIV_PAGE_SIZE);
+				bpage->comp_buf = alloc_aligned_buf(UNIV_PAGE_SIZE, &bpage->comp_buf_free);
 			}
 
 			fil_decompress_page(bpage->comp_buf, dst_frame, size, NULL);
@@ -5789,9 +5793,7 @@ buf_page_decrypt_after_read(
 			/* but we had NOT allocated a crypt buf
 			* malloc a buffer, copy page to it
 			* and then decrypt from that into real page*/
-			bpage->crypt_buf_free = (byte *)malloc(UNIV_PAGE_SIZE*2);
-			// TODO: is 4k aligment enough ?
-			src_frame = bpage->crypt_buf = (byte*)ut_align(bpage->crypt_buf_free, UNIV_PAGE_SIZE);
+			src_frame = bpage->crypt_buf = alloc_aligned_buf(UNIV_PAGE_SIZE, &bpage->crypt_buf_free);			memcpy(bpage->crypt_buf, dst_frame, size);
 			memcpy(bpage->crypt_buf, dst_frame, size);
 		}
 
@@ -5803,9 +5805,7 @@ buf_page_decrypt_after_read(
 		buffer pool */
 		if (page_compressed_encrypted) {
 			if (bpage->comp_buf_free == NULL) {
-				bpage->comp_buf_free = (byte *)malloc(UNIV_PAGE_SIZE*2);
-				// TODO: is 4k aligment enough ?
-				bpage->comp_buf = (byte*)ut_align(bpage->comp_buf_free, UNIV_PAGE_SIZE);
+				bpage->comp_buf = alloc_aligned_buf(UNIV_PAGE_SIZE, &bpage->comp_buf_free);
 			}
 
 			fil_decompress_page(bpage->comp_buf, dst_frame, size, NULL);
@@ -5814,19 +5814,7 @@ buf_page_decrypt_after_read(
 
 	bpage->key_version = key_version;
 
-	if (bpage->crypt_buf_free != NULL) {
-		// free temp page
-		free(bpage->crypt_buf_free);
-		bpage->crypt_buf = NULL;
-		bpage->crypt_buf_free = NULL;
-	}
-
-	if (bpage->comp_buf_free != NULL) {
-		// free temp page
-		free(bpage->comp_buf_free);
-		bpage->comp_buf = NULL;
-		bpage->comp_buf_free = NULL;
-	}
+	buf_page_encrypt_after_write(bpage);
 
 	return (TRUE);
 }

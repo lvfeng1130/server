@@ -862,7 +862,7 @@ fil_space_decrypt(fil_space_crypt_t* crypt_data,
 	}
 
 	if (page_type == FIL_PAGE_PAGE_COMPRESSED_ENCRYPTED) {
-		srclen = pow((double)2, (double)((int)compressed_len)) - FIL_PAGE_DATA;
+		srclen = (1ULL << compressed_len) - FIL_PAGE_DATA;
 	}
 
 	int rc = encryption_decrypt(src, srclen, dst, &dstlen,
