@@ -796,7 +796,9 @@ let $wait_condition=select count(*)=1 from information_schema.processlist
 --source include/wait_condition.inc
 --echo # --> connection default
 connection default;
-handler t1 read a prev;
+--echo # Attempt to upgrade metadata locks to SR from S will lead to
+--echo # deadlock which will result in table being automatically closed.
+--error ER_NO_SUCH_TABLE
 handler t1 read a prev;
 handler t1 close;
 --echo # --> connection con1
@@ -835,15 +837,23 @@ select * from t1;
 --echo # thus we can reopen it in the handler
 handler t1 open;
 --echo # We can commit the transaction, it doesn't close the handler
---echo # and doesn't let DROP to proceed.
+--echo # and doesn't let DROP to proceed immediately.
 commit;
-handler t1 read a prev;
-handler t1 read a prev;
+connection con2;
+--echo # Waiting for 'drop table t1' to get blocked...
+let $wait_condition=select count(*)=1 from information_schema.processlist
+                    where state='Waiting for table metadata lock' and
+                          info='drop table t1';
+--source include/wait_condition.inc
+--echo # --> connection default
+connection default;
+--echo # OTOH the first attempt to read from HANDLER will lead to metadata
+--echo # locks deadlock and thus to HANDLER being automatically closed.
+--error ER_NO_SUCH_TABLE
 handler t1 read a prev;
 handler t1 close;
 --echo # --> connection con1
 connection con1;
---echo # Now drop can proceed
 --echo # Reaping 'drop table t1'...
 --reap
 --echo # --> connection default
@@ -984,12 +994,19 @@ connection con2;
 --reap
 --echo # Demonstrate that ROLLBACK TO SAVEPOINT didn't release the handler
 --echo # lock.
+--echo # --> connection con3
+connection con3;
+--echo # Check if 'drop table t1' still blocked...
+let $wait_condition=select count(*)=1 from information_schema.processlist
+                    where state='Waiting for table metadata lock' and
+                          info='drop table t1';
+--source include/wait_condition.inc
 --echo # --> connection default
 connection default;
+--echo # Demonstrate that the drop will go through as soon as we close
+--echo # or will try to access HANDLER
+--error ER_NO_SUCH_TABLE
 handler t1 read a next;
-handler t1 read a next;
---echo # Demonstrate that the drop will go through as soon as we close the 
---echo # HANDLER
 handler t1 close;
 --echo # connection con1
 connection con1;
@@ -1053,12 +1070,19 @@ connection con2;
 --reap
 --echo # Demonstrate that ROLLBACK TO SAVEPOINT didn't release the handler
 --echo # lock.
+--echo # --> connection con3
+connection con3;
+--echo # Check if 'drop table t1' is still blocked...
+let $wait_condition=select count(*)=1 from information_schema.processlist
+                    where state='Waiting for table metadata lock' and
+                          info='drop table t1';
+--source include/wait_condition.inc
 --echo # --> connection default
 connection default;
+--echo # Demonstrate that the drop will go through as soon as we access or
+--echo # close the HANDLER
+--error ER_NO_SUCH_TABLE
 handler t1 read a next;
-handler t1 read a next;
---echo # Demonstrate that the drop will go through as soon as we close the 
---echo # HANDLER
 handler t1 close;
 --echo # connection con1
 connection con1;
@@ -1100,13 +1124,13 @@ let $wait_condition=select count(*)=1 from information_schema.processlist
                     where state='Waiting for table metadata lock' and
                           info='drop table t3';
 --source include/wait_condition.inc
---echo # Demonstrate that ROLLBACK TO SAVEPOINT didn't release the handler
---echo # lock.
+--echo # The fact that DROP TABLE is blocked means that ROLLBACK TO SAVEPOINT
+--echo # didn't release the handler lock.
 --echo # --> connection default
 connection default;
+--echo # Drop will go through as soon as we access or close the HANDLER
+--error ER_NO_SUCH_TABLE
 handler t3 read a next;
---echo # Demonstrate that the drop will go through as soon as we close the 
---echo # HANDLER
 handler t3 close;
 --echo # connection con1
 connection con1;
@@ -1214,7 +1238,7 @@ connection con1;
 --echo # Waiting for 'handler t1 read a next' to get blocked...
 let $wait_condition=
   select count(*) = 1 from information_schema.processlist
-  where state = "Waiting for table level lock" and
+  where state = "Waiting for table metadata lock" and
         info = "handler t1 read a next";
 --source include/wait_condition.inc
 

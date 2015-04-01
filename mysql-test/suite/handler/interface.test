@@ -333,8 +333,7 @@ connection con1;
 --reap
 unlock tables;
 drop table t1;
---echo # Now test case which was reported originally but which no longer
---echo # triggers execution path which has caused the problem.
+--echo # Now test case which was reported originally.
 connection default;
 create table t1 (a int not null);
 insert into t1 values (1);
@@ -348,10 +347,7 @@ let $wait_condition=
         info = "alter table t1 engine=csv";
 --source include/wait_condition.inc
 connection default;
---echo # Since S metadata lock was already acquired at HANDLER OPEN time
---echo # and TL_READ lock requested by HANDLER READ is compatible with
---echo # ALTER's TL_WRITE_ALLOW_READ the below statement should succeed
---echo # without waiting. The old version of table should be used in it.
+--error ER_ILLEGAL_HA
 handler t1 read next;
 handler t1 close;
 connection con1;

@@ -488,56 +488,6 @@ bool mysql_ha_close(THD *thd, TABLE_LIST *tables)
 
 
 /**
-  A helper class to process an error from mysql_lock_tables().
-  HANDLER READ statement's attempt to lock the subject table
-  may get aborted if there is a pending DDL. In that case
-  we close the table, reopen it, and try to read again.
-  This is implicit and obscure, since HANDLER position
-  is lost in the process, but it's the legacy server
-  behaviour we should preserve.
-*/
-
-class Sql_handler_lock_error_handler: public Internal_error_handler
-{
-public:
-  virtual
-  bool handle_condition(THD *thd,
-                        uint sql_errno,
-                        const char *sqlstate,
-                        Sql_condition::enum_warning_level level,
-                        const char* msg,
-                        Sql_condition **cond_hdl);
-
-  bool need_reopen() const { return m_need_reopen; };
-  void init() { m_need_reopen= FALSE; };
-private:
-  bool m_need_reopen;
-};
-
-
-/**
-  Handle an error from mysql_lock_tables().
-  Ignore ER_LOCK_ABORTED errors.
-*/
-
-bool
-Sql_handler_lock_error_handler::
-handle_condition(THD *thd,
-                 uint sql_errno,
-                 const char *sqlstate,
-                 Sql_condition::enum_warning_level level,
-                 const char* msg,
-                 Sql_condition **cond_hdl)
-{
-  *cond_hdl= NULL;
-  if (sql_errno == ER_LOCK_ABORTED)
-    m_need_reopen= TRUE;
-
-  return m_need_reopen;
-}
-
-
-/**
    Finds an open HANDLER table.
 
    @params name		Name of handler to open
@@ -733,7 +683,8 @@ bool mysql_ha_read(THD *thd, TABLE_LIST *tables,
   int           error, keyno;
   uint          num_rows;
   uchar		*UNINIT_VAR(key);
-  Sql_handler_lock_error_handler sql_handler_lock_error;
+  MDL_deadlock_and_lock_abort_error_handler sql_handler_lock_error;
+  MDL_savepoint mdl_savepoint;
   DBUG_ENTER("mysql_ha_read");
   DBUG_PRINT("enter",("'%s'.'%s' as '%s'",
                       tables->db, tables->table_name, tables->alias));
@@ -752,6 +703,48 @@ retry:
   tables->table= table;                         // This is used by fix_fields
   table->pos_in_table_list= tables;
 
+  sql_handler_lock_error.init();
+
+  /*
+    For non-temporary tables we need to acquire SR lock in order to ensure
+    that HANDLER READ is blocked by LOCK TABLES WRITE in other connections
+    for storage engines which don't use THR_LOCK locks (e.g. InnoDB).
+
+    To simplify clean-up code we take MDL_savepoint even for temporary tables.
+  */
+  mdl_savepoint= thd->mdl_context.mdl_savepoint();
+
+  if (table->s->tmp_table == NO_TMP_TABLE)
+  {
+    MDL_request read_request;
+
+    read_request.init(&handler->mdl_request.key, MDL_SHARED_READ,
+                      MDL_TRANSACTION);
+
+    thd->push_internal_handler(&sql_handler_lock_error);
+
+    error= thd->mdl_context.acquire_lock(&read_request,
+                                         thd->variables.lock_wait_timeout);
+    thd->pop_internal_handler();
+
+    if (sql_handler_lock_error.need_reopen())
+    {
+      /*
+        HANDLER READ statement's attempt to upgrade lock on the subject table
+        may get aborted if there is a pending DDL. In that case we close the
+        table, reopen it, and try to read again.
+        This is implicit and obscure, since HANDLER position is lost in the
+        process, but it's the legacy server behaviour we should preserve.
+      */
+      DBUG_ASSERT(error && !thd->is_error());
+      mysql_ha_close_table(handler);
+      goto retry;
+    }
+
+    if (error)
+      goto err0;
+  }
+
   if (handler->lock->lock_count > 0)
   {
     int lock_error;
@@ -768,7 +761,7 @@ retry:
     */
     thd->set_open_tables(table);
 
-    sql_handler_lock_error.init();
+    /* Re-use Sql_handler_lock_error instance which was initialized earlier. */
     thd->push_internal_handler(&sql_handler_lock_error);
 
     lock_error= mysql_lock_tables(thd, handler->lock,
@@ -797,6 +790,7 @@ retry:
       */
       DBUG_ASSERT(! thd->transaction_rollback_request);
       trans_rollback_stmt(thd);
+      thd->mdl_context.rollback_to_savepoint(mdl_savepoint);
       mysql_ha_close_table(handler);
       if (thd->stmt_arena->is_stmt_execute())
       {
@@ -812,7 +806,10 @@ retry:
     }
 
     if (lock_error)
+    {
+      thd->mdl_context.rollback_to_savepoint(mdl_savepoint);
       goto err0; // mysql_lock_tables() printed error message already
+    }
   }
 
   if (mysql_ha_fix_cond_and_key(handler, mode, keyname, key_expr, cond, 0))
@@ -957,6 +954,7 @@ ok:
   */
   trans_commit_stmt(thd);
   mysql_unlock_tables(thd, handler->lock, 0);
+  thd->mdl_context.rollback_to_savepoint(mdl_savepoint);
   my_eof(thd);
   DBUG_PRINT("exit",("OK"));
   DBUG_RETURN(FALSE);

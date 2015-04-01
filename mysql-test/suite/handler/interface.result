@@ -273,19 +273,13 @@ ERROR HY000: Storage engine CSV of the table `test`.`t1` doesn't have this optio
 handler t1 close;
 unlock tables;
 drop table t1;
-# Now test case which was reported originally but which no longer
-# triggers execution path which has caused the problem.
+# Now test case which was reported originally.
 create table t1 (a int not null);
 insert into t1 values (1);
 handler t1 open;
 alter table t1 engine=csv;
-# Since S metadata lock was already acquired at HANDLER OPEN time
-# and TL_READ lock requested by HANDLER READ is compatible with
-# ALTER's TL_WRITE_ALLOW_READ the below statement should succeed
-# without waiting. The old version of table should be used in it.
 handler t1 read next;
-a
-1
+ERROR HY000: Storage engine CSV of the table `test`.`t1` doesn't have this option
 handler t1 close;
 drop table t1;
 USE information_schema;

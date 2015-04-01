@@ -1535,6 +1535,41 @@ private:
 
 
 /**
+  Internal error handler to process an error from MDL_context::upgrade_lock()
+  and mysql_lock_tables(). Used by implementations of HANDLER READ and
+  LOCK TABLES LOCAL.
+*/
+
+class MDL_deadlock_and_lock_abort_error_handler: public Internal_error_handler
+{
+public:
+  /**
+    Handle an error from MDL_context::upgrade_lock() and mysql_lock_tables().
+    Ignore ER_LOCK_ABORTED and ER_LOCK_DEADLOCK errors.
+  */
+  virtual
+  bool handle_condition(THD *thd,
+                        uint sql_errno,
+                        const char *sqlstate,
+                        Sql_condition::enum_warning_level level,
+                        const char* msg,
+                        Sql_condition **cond_hdl)
+  {
+    *cond_hdl= NULL;
+    if (sql_errno == ER_LOCK_ABORTED || sql_errno == ER_LOCK_DEADLOCK)
+      m_need_reopen= true;
+
+    return m_need_reopen;
+  }
+
+  bool need_reopen() const { return m_need_reopen; };
+  void init() { m_need_reopen= false; };
+private:
+  bool m_need_reopen;
+};
+
+
+/**
   Tables that were locked with LOCK TABLES statement.
 
   Encapsulates a list of TABLE_LIST instances for tables
